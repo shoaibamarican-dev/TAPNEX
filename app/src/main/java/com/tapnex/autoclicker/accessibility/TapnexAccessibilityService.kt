@@ -70,9 +70,9 @@ class TapnexAccessibilityService : AccessibilityService() {
                     startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:$packageName")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
             }
-        } else if (foregroundPackage != packageName) {
+        } else {
             permissionPromptedForTarget = null
-            // Leaving the selected target hides controls and stops any active click session.
+            // Any app other than the selected target (including TAPNEX itself) hides controls.
             stopEngine()
             stopService(Intent(this, FloatingControlService::class.java))
             stopService(Intent(this, com.tapnex.autoclicker.overlay.SecondaryControlService::class.java))

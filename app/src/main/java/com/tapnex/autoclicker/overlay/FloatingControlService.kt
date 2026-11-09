@@ -64,6 +64,8 @@ class FloatingControlService : Service() {
     private var menuShown = false
     private var menuState: TextView? = null
     private var startButton: Button? = null
+    private var holdButton: Button? = null
+    private var holdStartedEngine = false
     private var minimizeButton: Button? = null
     private var lockButton: Button? = null
     private val clickerViews = mutableMapOf<String, View>()
@@ -197,6 +199,40 @@ class FloatingControlService : Service() {
         container.addView(menuState)
         container.addView(menuButton("Add Clicker") { addClicker() })
         startButton = menuButton("Start Clicking") { toggleEngine() }.also { container.addView(it) }
+        holdButton = menuButton("Hold to Click") { }.also { button ->
+            button.setOnTouchListener { view, event ->
+                val svc = TapnexAccessibilityService.instance
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        holdStartedEngine = svc != null && svc.engineState == EngineState.IDLE
+                        if (svc == null) {
+                            toast("Accessibility permission is required.")
+                            holdStartedEngine = false
+                        } else if (holdStartedEngine) {
+                            svc.intervalOverrideMs = FloatingSettings.load(this).intervalMs
+                            val error = svc.startEngine(TapnexAccessibilityService.OWNER_MAIN)
+                            if (error != null) {
+                                holdStartedEngine = false
+                                toast(error)
+                            }
+                        }
+                        updateColor()
+                        updateMenuLabels()
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        if (holdStartedEngine) svc?.stopEngine()
+                        holdStartedEngine = false
+                        updateColor()
+                        updateMenuLabels()
+                        view.performClick()
+                        true
+                    }
+                    else -> true
+                }
+            }
+            container.addView(button)
+        }
         lockButton = menuButton("Lock Clicker") { toggleClickerLocks() }.also { container.addView(it) }
         container.addView(menuButton("Click Speed") { showSpeedDialog() })
         minimizeButton = menuButton("Minimize") { if (minimized) restoreSize() else minimizeSize() }.also { container.addView(it) }
@@ -249,6 +285,7 @@ class FloatingControlService : Service() {
             else -> "TAPNEX • Ready"
         }
         startButton?.text = if (svc?.engineState == EngineState.RUNNING) "Stop Clicking" else "Start Clicking"
+        holdButton?.text = if (holdStartedEngine && svc?.engineState == EngineState.RUNNING) "Release to Stop" else "Hold to Click"
         minimizeButton?.text = if (minimized) "Restore" else "Minimize"
         lockButton?.text = if (PointStore.load().all { it.locked }) "Unlock Clicker" else "Lock Clicker"
     }

@@ -1,97 +1,43 @@
-# TAPNEX
+# TAPNEX — device-only Android source
 
-TAPNEX is a general-purpose Android accessibility clicker with Firebase authentication, server-verified rewarded-ad credits, a selectable target app, and animated floating controls.
+This variant keeps the Android app project and removes Firebase Authentication, Firestore, Cloud Functions, server accounts, credits, and wallet dependencies. App selection and click-point settings are stored locally on the device.
 
-## Production configuration
+## Included app features
 
-The production AdMob configuration is already wired into the release build:
+- Existing TAPNEX dark interface, splash screen, app picker, and local device profile
+- Locally stored selected target app
+- Floating control panel that appears when the selected target app enters the foreground (requires the user to enable Android overlay and Accessibility permissions)
+- User-configured click points, draggable/lockable positions, adjustable interval controls, and a press-and-hold control that stops when released
+- AdMob banner integration; debug APKs use Google's official test banner ad unit
+- GitHub Actions workflow that builds and uploads a debug APK automatically
 
-- AdMob App ID: `ca-app-pub-2888936097455517~2870896170`
-- Banner ad unit: `ca-app-pub-2888936097455517/1557814503`
-- Rewarded ad unit: `ca-app-pub-2888936097455517/9384333631`
+## Removed
 
-Debug builds always use Google's test ad units. Test ads never grant credits.
+- Firebase login / Google sign-in
+- Firebase Firestore and Cloud Functions
+- Wallet, credits, and server-side session unlock
 
-Cloud Functions use `functions/.env`. Copy `functions/.env.example` to `functions/.env`; the template contains the production rewarded ad unit ID. Do not commit `functions/.env`.
+There is no cloud account or sync. Clearing app data or uninstalling the app removes its locally stored settings. This source does not include a mandatory rewarded-ad gate before opening other apps; rewarded ads are opt-in and should not be used to force access to unrelated app functionality. It also does not include game-specific rapid-fire presets or anti-cheat bypasses.
 
-## Firebase
+## Build the APK using GitHub (no local Android Studio required)
 
-The existing Firebase project integration and package name are preserved. Firebase Authentication and Firestore must be enabled in the Firebase project. Google sign-in additionally requires a valid web OAuth client and the installed signing certificate fingerprints in Firebase.
+1. Download and extract this ZIP.
+2. Upload **all files and folders inside** the extracted `TAPNEX` folder to your GitHub repository (the files `settings.gradle.kts`, `gradlew`, `gradle/`, `app/`, and `.github/` must be at the repository root).
+3. Commit the files to the `main` branch (or `master`). The workflow also supports manual runs.
+4. In GitHub, open the repository's **Actions** tab.
+5. Select **TAPNEX Android APK**, then click **Run workflow** if it has not already started after your push.
+6. Open the completed workflow run. Under **Artifacts**, download **TAPNEX-debug-APK**.
+7. Extract the artifact ZIP; it contains `app-debug.apk`. Transfer that APK to your Android device and install it.
 
-Deploy backend functions and Firestore rules with:
+The first GitHub build may take several minutes while Gradle downloads dependencies. The workflow uses GitHub-hosted build resources and does not require Firebase or Blaze billing.
 
-```text
-cd functions
-npm ci
-npm test
-cd ..
-firebase deploy --only functions,firestore:rules --project tapnex-74d6d
-```
+## Build details and limitations
 
-## Credits and rewarded ads
+- Application ID: `com.tapnex.autoclicker`
+- Minimum Android version: Android 8.0 (API 26)
+- Compile/target SDK: Android 15 (API 35)
+- The GitHub workflow creates a **debug-signed test APK**, not a Play Store release-signed APK.
+- Debug ads use Google's official test banner unit. Do not click test ads repeatedly or use test ads in a published release.
+- Android Accessibility controls are general-purpose and user-configured. Use them responsibly and follow the rules of apps in which they are enabled.
 
-Credits are read from the authenticated Firebase account. The Android client never writes a credit balance.
-
-For a production rewarded ad:
-
-1. TAPNEX loads the configured production rewarded unit.
-2. AdMob sends the completed-ad SSV callback to `admobRewardCallback`.
-3. The Cloud Function verifies Google's signature and key ID.
-4. The function accepts only the configured production ad unit.
-5. The function creates one claim document per transaction ID and grants exactly 5 credits.
-6. Replayed transaction IDs are rejected as already credited.
-7. The app refreshes Firestore and reports success only after the server-side balance has changed.
-
-The server ignores the reward amount supplied by the client/callback and uses the fixed 5-credit reward.
-
-## Floating controls
-
-After Display over other apps and Accessibility permissions are enabled, the user can select a target application from the installed-app picker. When that target enters the foreground, TAPNEX automatically shows the floating control. When the target leaves the foreground, TAPNEX hides the controls and stops active click sessions.
-
-The floating menu includes:
-
-- Add Clicker
-- Start/Stop Clicking
-- Lock Clicker
-- Click Speed
-- Minimize/Restore
-- Close floating menu
-
-Clickers are red circular overlays. Their position, enabled state, lock state, opacity (10–50%), size, and interval are saved locally. Accessibility gestures are sent only to explicitly configured points and only during an active user-started session.
-
-## Settings
-
-The Settings screen intentionally contains permissions only:
-
-- Display over other apps
-- Accessibility
-- Notifications on Android versions that require notification permission
-
-Clicker configuration is available from the Home screen and floating menu, not from Settings.
-
-## Build
-
-The project uses the included Gradle wrapper and JDK 17. Android SDK 35 is required.
-
-```text
-./gradlew assembleDebug
-./gradlew assembleRelease
-```
-
-Release signing is not included in the repository. Configure a private release keystore through Gradle properties or environment variables when a signed release is required.
-
-## Secrets excluded from this repository
-
-Do not commit:
-
-- `.env` files containing private values
-- Android keystores
-- Private signing keys
-- Firebase service-account private keys
-- Passwords or personal credentials
-
-The existing GitHub Actions workflow and Gradle wrapper are preserved.
-
-## Verification
-
-The supplied environment did not provide a usable Android Gradle distribution download or a complete Android SDK, so an Android APK build could not be truthfully verified in this repair environment. Cloud Function tests were also blocked because the environment could not complete the npm dependency installation. The project package was nevertheless inspected, modified, and packaged without including generated dependency folders or private credentials.
+This archive is source code for GitHub Actions to build. It is not itself an APK, and a successful build still needs to be confirmed by the GitHub Actions run.

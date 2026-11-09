@@ -2,7 +2,6 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.google.gms.google-services")
 }
 
 /**
@@ -14,9 +13,7 @@ fun setting(name: String): String? =
     (project.findProperty(name) as? String)?.takeIf { it.isNotBlank() } ?: System.getenv(name)?.takeIf { it.isNotBlank() }
 
 val PROD_BANNER_AD_UNIT_ID = "ca-app-pub-2888936097455517/1557814503"
-val PROD_REWARDED_AD_UNIT_ID = "ca-app-pub-2888936097455517/9384333631"
 val TEST_BANNER_AD_UNIT_ID = "ca-app-pub-3940256099942544/6300978111"
-val TEST_REWARDED_AD_UNIT_ID = "ca-app-pub-3940256099942544/5224354917"
 
 android {
     namespace = "com.tapnex.autoclicker"
@@ -31,7 +28,6 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("boolean", "USE_TEST_ADS", "false")
         buildConfigField("String", "BANNER_AD_UNIT_ID", "\"$PROD_BANNER_AD_UNIT_ID\"")
-        buildConfigField("String", "REWARDED_AD_UNIT_ID", "\"$PROD_REWARDED_AD_UNIT_ID\"")
     }
 
     buildFeatures {
@@ -72,7 +68,6 @@ android {
             versionNameSuffix = "-debug"
             buildConfigField("boolean", "USE_TEST_ADS", "true")
             buildConfigField("String", "BANNER_AD_UNIT_ID", "\"$TEST_BANNER_AD_UNIT_ID\"")
-            buildConfigField("String", "REWARDED_AD_UNIT_ID", "\"$TEST_REWARDED_AD_UNIT_ID\"")
         }
         release {
             isMinifyEnabled = true
@@ -94,17 +89,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.15.0")
-    // Firebase BOM must be applied with platform() so the Firebase libraries below get versions.
-    implementation(platform("com.google.firebase:firebase-bom:33.10.0"))
-    implementation("com.google.firebase:firebase-auth")
-    implementation("com.google.firebase:firebase-firestore")
-    implementation("com.google.firebase:firebase-functions")
-    // Credential Manager + Google ID token for Firebase Google Sign-In.
-    implementation("androidx.credentials:credentials:1.3.0")
-    implementation("androidx.credentials:credentials-play-services-auth:1.3.0")
-    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
     implementation("com.google.android.gms:play-services-ads:23.6.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

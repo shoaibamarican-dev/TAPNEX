@@ -45,23 +45,13 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import androidx.navigation.compose.*
-import com.google.firebase.functions.FirebaseFunctions
-import com.tapnex.autoclicker.account.AccountScreen
-import com.tapnex.autoclicker.account.AccountService
-import com.tapnex.autoclicker.account.WalletService
 import com.tapnex.autoclicker.ads.BannerAd
-import com.tapnex.autoclicker.ads.RewardedAdButton
 import com.tapnex.autoclicker.model.ClickPoint
 import com.tapnex.autoclicker.model.PointStore
 import com.tapnex.autoclicker.overlay.FloatingControlService
 import com.tapnex.autoclicker.overlay.SecondaryControlService
 import com.tapnex.autoclicker.settings.FloatingSettingsScreen
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
-import java.util.UUID
 
 /** Fixed TAPNEX look: dark base with red and yellow accents, white text. No theme chooser. */
 private object Tp {
@@ -77,7 +67,6 @@ private object Tp {
 private const val APPS_PREFS = "tapnex_apps"
 private const val TARGET_PREFS = "tapnex_target"
 private const val TARGET_KEY = "package"
-private const val UNLOCK_COST = 5
 
 private val tapnexScheme = darkColorScheme(
     primary = Tp.Red,
@@ -121,16 +110,8 @@ private fun TapnexApp(refresh: Int) {
     NavHost(navController = nav, startDestination = "splash") {
         composable("splash") {
             SplashScreen(onDone = {
-                nav.navigate(if (AccountService.currentUid == null) "account" else "main") {
-                    popUpTo("splash") { inclusive = true }
-                }
+                nav.navigate("main") { popUpTo("splash") { inclusive = true } }
             })
-        }
-        composable("account") {
-            AccountScreen(
-                onBack = { nav.navigate("main") { popUpTo("account") { inclusive = true } } },
-                onAuthenticated = { nav.navigate("main") { popUpTo("account") { inclusive = true } } }
-            )
         }
         composable("main") {
             MainScreen(
@@ -173,25 +154,7 @@ private fun MainScreen(
     onOpenPoints: () -> Unit
 ) {
     val ctx = LocalContext.current
-    var tab by remember { mutableStateOf(0) } // 0 = home, 1 = profile, 2 = settings
-    var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
-
-    val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        // Notifications only make the floating control's status visible; the control works either way.
-        pendingAction?.invoke()
-        pendingAction = null
-    }
-    // Android 13+ asks for notification permission before a floating control starts.
-    val withNotifications: (() -> Unit) -> Unit = { action ->
-        val needs = Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        if (needs) {
-            pendingAction = action
-            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            action()
-        }
-    }
+    var tab by remember { mutableStateOf(0) } // 0 = home, 1 = local profile, 2 = settings
 
     Scaffold(
         containerColor = Tp.Bg,
@@ -200,7 +163,7 @@ private fun MainScreen(
                 selected = tab,
                 onStart = {
                     tab = 0
-                    withNotifications { toast(ctx, showMainControl(ctx)) }
+                    toast(ctx, "Open your selected target app; the floating controls appear there.")
                 },
                 onHome = { tab = 0 },
                 onProfile = { tab = 1 },
@@ -211,7 +174,7 @@ private fun MainScreen(
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (tab) {
                 0 -> HomeTab(refresh, onOpenApps, onOpenPoints)
-                1 -> AccountScreen(onBack = { tab = 0 }, onAuthenticated = {})
+                1 -> LocalProfileTab()
                 else -> SettingsTab(refresh = refresh)
             }
         }
@@ -249,76 +212,26 @@ private fun BottomBar(selected: Int, onStart: () -> Unit, onHome: () -> Unit, on
 @Composable
 private fun HomeTab(refresh: Int, onOpenApps: () -> Unit, onOpenPoints: () -> Unit) {
     val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val uid = AccountService.currentUid
-    var credits by remember { mutableStateOf<Long?>(null) }
-    var creditLoading by remember { mutableStateOf(true) }
-    var creditError by remember { mutableStateOf<String?>(null) }
-    var adStatus by remember { mutableStateOf<String?>(null) }
     var packages by remember(refresh) { mutableStateOf(loadAddedApps(ctx)) }
-
-    LaunchedEffect(uid, refresh) {
-        creditLoading = true
-        creditError = null
-        credits = if (uid == null) 0L else try {
-            WalletService.load(uid).balance
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            creditError = "Could not load your credits. Check your connection and try again."
-            null
-        }
-        creditLoading = false
-    }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Image(
-                painter = painterResource(R.drawable.tapnex_app_icon),
-                contentDescription = "TAPNEX",
-                modifier = Modifier.size(44.dp)
-            )
+            Image(painter = painterResource(R.drawable.tapnex_app_icon), contentDescription = "TAPNEX", modifier = Modifier.size(44.dp))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text("TAPNEX", fontSize = 24.sp, fontWeight = FontWeight.Black, color = Tp.Red)
-                Text(
-                    if (uid == null) "Sign in in the Profile tab" else (AccountService.currentEmail ?: "Signed in"),
-                    color = Tp.Muted,
-                    fontSize = 12.sp,
-                    maxLines = 1
-                )
+                Text("Device-only mode • No account or wallet", color = Tp.Muted, fontSize = 12.sp)
             }
         }
-
-        // Credit card
         Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = Tp.CardHi)) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("CREDIT", color = Tp.Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    when {
-                        creditLoading -> CircularProgressIndicator(modifier = Modifier.size(28.dp))
-                        credits != null -> Text("${credits}", fontSize = 40.sp, fontWeight = FontWeight.Black, color = Tp.Yellow, modifier = Modifier.weight(1f))
-                        else -> Text("—", fontSize = 40.sp, fontWeight = FontWeight.Black, color = Tp.Red, modifier = Modifier.weight(1f))
-                    }
-                    Text("$UNLOCK_COST per app", color = Tp.Muted, fontSize = 12.sp)
-                }
-                RewardedAdButton(
-                    label = "+ Watch ad for 5 credits",
-                    userId = uid,
-                    onStatus = { adStatus = it },
-                    onWalletUpdated = { credits = it; creditError = null; creditLoading = false },
-                    enabled = uid != null && !creditLoading
-                )
-                if (uid == null) Text("Sign in to earn and spend credits.", color = Tp.Muted, fontSize = 12.sp)
-                creditError?.let { Text(it, color = Tp.Red, fontSize = 12.sp) }
-                adStatus?.let { Text(it, color = Tp.Muted, fontSize = 12.sp) }
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("READY TO USE", color = Tp.Yellow, fontWeight = FontWeight.Bold)
+                Text("Choose a target app below. TAPNEX floating controls appear when that app is opened.", color = Tp.White)
             }
         }
-
-        // App library
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("APP LIBRARY", fontWeight = FontWeight.Bold, letterSpacing = 1.sp, modifier = Modifier.weight(1f))
             FilledTonalButton(onClick = onOpenApps) {
@@ -327,19 +240,12 @@ private fun HomeTab(refresh: Int, onOpenApps: () -> Unit, onOpenPoints: () -> Un
                 Text("Add app")
             }
         }
-
-        if (packages.isEmpty()) {
-            Text("No apps yet. Tap Add app to choose the apps you want TAPNEX to open.", color = Tp.Muted)
-        }
-
-        OutlinedButton(onClick = onOpenPoints, modifier = Modifier.fillMaxWidth()) {
-            Text("Manage clickers")
-        }
-
+        if (packages.isEmpty()) Text("No apps yet. Tap Add app to choose a target app.", color = Tp.Muted)
+        OutlinedButton(onClick = onOpenPoints, modifier = Modifier.fillMaxWidth()) { Text("Manage click points") }
         packages.forEach { pkg ->
             AppRow(
                 pkg = pkg,
-                onOpen = { unlockAndOpen(ctx, scope, uid, pkg) { credits = it } },
+                onOpen = { openSelectedApp(ctx, pkg) },
                 onRemove = {
                     packages = packages - pkg
                     saveAddedApps(ctx, packages)
@@ -347,8 +253,15 @@ private fun HomeTab(refresh: Int, onOpenApps: () -> Unit, onOpenPoints: () -> Un
                 }
             )
         }
-
         BannerAd(Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
+private fun LocalProfileTab() {
+    Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Device profile", fontSize = 26.sp, fontWeight = FontWeight.Black)
+        Text("TAPNEX works locally on this device. No email, password, Firebase account, credits, or wallet are used.", color = Tp.Muted)
     }
 }
 
@@ -367,7 +280,7 @@ private fun AppRow(pkg: String, onOpen: () -> Unit, onRemove: () -> Unit) {
             if (icon != null) Image(icon, contentDescription = null, modifier = Modifier.size(48.dp))
             Column(Modifier.weight(1f).padding(start = 14.dp)) {
                 Text(ctx.packageManager.getApplicationLabel(info).toString(), fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-                Text("$UNLOCK_COST credits • Tap to open", color = Tp.Muted, fontSize = 12.sp)
+                Text("Selected app • Tap to open", color = Tp.Muted, fontSize = 12.sp)
             }
             TextButton(onClick = onRemove) { Text("Remove", color = Tp.Muted) }
         }
@@ -461,49 +374,17 @@ private fun setTargetPackage(ctx: Context, pkg: String?) {
         if (pkg == null) remove(TARGET_KEY) else putString(TARGET_KEY, pkg)
     }.apply()
 }
-/** Returns a user-facing message. Starts the main floating control only when every requirement is met. */
-private fun showMainControl(ctx: Context): String = when {
-    !Permissions.canDrawOverlay(ctx) -> "Allow 'Display over other apps' first (Settings)."
-    !Permissions.isAccessibilityEnabled(ctx) -> "Turn on TAPNEX in Accessibility settings first."
-    PointStore.load().none { it.enabled } -> "Add and enable a tap point first (Settings > Tap points)."
-    else -> {
-        ContextCompat.startForegroundService(ctx, Intent(ctx, FloatingControlService::class.java))
-        "Floating control shown. Tap it to open its menu."
-    }
-}
-
-/** Charges 5 credits on the server, then opens the app. The server is the only authority on credits. */
-private fun unlockAndOpen(ctx: Context, scope: CoroutineScope, uid: String?, pkg: String, onBalance: (Long) -> Unit) {
-    if (uid == null) {
-        toast(ctx, "Sign in first (Profile tab).")
+/** Launches the selected app. The accessibility service detects it and shows controls there. */
+private fun openSelectedApp(ctx: Context, pkg: String) {
+    setTargetPackage(ctx, pkg)
+    val launch = ctx.packageManager.getLaunchIntentForPackage(pkg)
+    if (launch == null) {
+        toast(ctx, "This app cannot be opened from TAPNEX.")
         return
     }
-    scope.launch {
-        try {
-            FirebaseFunctions.getInstance()
-                .getHttpsCallable("startSession")
-                .call(mapOf("requestId" to UUID.randomUUID().toString(), "targetPackage" to pkg))
-                .await()
-            onBalance(WalletService.load(uid).balance)
-            val launch = ctx.packageManager.getLaunchIntentForPackage(pkg)
-            if (launch != null) {
-                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                ctx.startActivity(launch)
-            } else {
-                toast(ctx, "Credits charged, but this app cannot be opened.")
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            val details = e.message.orEmpty()
-            toast(
-                ctx,
-                if (details.contains("Insufficient credits", true) || details.contains("failed-precondition", true))
-                    "Not enough credits. Watch an ad to earn 5 credits."
-                else "Could not open the app. Check your connection and try again."
-            )
-        }
-    }
+    launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { ctx.startActivity(launch) }
+        .onFailure { toast(ctx, "Could not open this app.") }
 }
 
 private fun toast(ctx: Context, message: String) {
