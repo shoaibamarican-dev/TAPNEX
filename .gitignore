@@ -1,0 +1,10 @@
+*.jks
+*.keystore
+*/build/
+.gradle/
+.idea/
+build/
+functions/.env
+functions/lib/
+local.properties
+node_modules/

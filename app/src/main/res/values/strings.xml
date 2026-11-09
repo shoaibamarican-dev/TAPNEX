@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">TAPNEX</string>
+    <string name="accessibility_description">TAPNEX uses accessibility gesture dispatch only to perform user-configured taps during an explicitly started session. It does not read screen content.</string>
+</resources>

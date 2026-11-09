@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "209203154034",
+    "project_id": "tapnex-74d6d",
+    "storage_bucket": "tapnex-74d6d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:209203154034:android:1e097c093dda6851ed46eb",
+        "android_client_info": {
+          "package_name": "com.tapnex.autoclicker"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD_bxiu82paUB6S21aimLEIzBDgu69z0Qc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
