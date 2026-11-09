@@ -13,10 +13,10 @@ plugins {
 fun setting(name: String): String? =
     (project.findProperty(name) as? String)?.takeIf { it.isNotBlank() } ?: System.getenv(name)?.takeIf { it.isNotBlank() }
 
-const val PROD_BANNER_AD_UNIT_ID = "ca-app-pub-2888936097455517/1557814503"
-const val PROD_REWARDED_AD_UNIT_ID = "ca-app-pub-2888936097455517/9384333631"
-const val TEST_BANNER_AD_UNIT_ID = "ca-app-pub-3940256099942544/6300978111"
-const val TEST_REWARDED_AD_UNIT_ID = "ca-app-pub-3940256099942544/5224354917"
+val PROD_BANNER_AD_UNIT_ID = "ca-app-pub-2888936097455517/1557814503"
+val PROD_REWARDED_AD_UNIT_ID = "ca-app-pub-2888936097455517/9384333631"
+val TEST_BANNER_AD_UNIT_ID = "ca-app-pub-3940256099942544/6300978111"
+val TEST_REWARDED_AD_UNIT_ID = "ca-app-pub-3940256099942544/5224354917"
 
 android {
     namespace = "com.tapnex.autoclicker"
