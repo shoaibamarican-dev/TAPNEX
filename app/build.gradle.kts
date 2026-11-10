@@ -12,8 +12,15 @@ plugins {
 fun setting(name: String): String? =
     (project.findProperty(name) as? String)?.takeIf { it.isNotBlank() } ?: System.getenv(name)?.takeIf { it.isNotBlank() }
 
-val PROD_BANNER_AD_UNIT_ID = "ca-app-pub-2888936097455517/1557814503"
+// Real TAPNEX AdMob units (App ID ca-app-pub-2888936097455517~8810579025 is set in AndroidManifest.xml).
+val PROD_BANNER_AD_UNIT_ID = "ca-app-pub-2888936097455517/4533643859"
+val PROD_REWARDED_AD_UNIT_ID = "ca-app-pub-2888936097455517/4316800244"
+// Google's official test units. Safe to click while developing.
 val TEST_BANNER_AD_UNIT_ID = "ca-app-pub-3940256099942544/6300978111"
+val TEST_REWARDED_AD_UNIT_ID = "ca-app-pub-3940256099942544/5224354917"
+
+// Debug builds show TEST ads. Set TAPNEX_LIVE_ADS=true (env var or gradle property) to use real ads in debug too.
+val liveAdsInDebug = setting("TAPNEX_LIVE_ADS") == "true"
 
 android {
     namespace = "com.tapnex.autoclicker"
@@ -23,11 +30,12 @@ android {
         applicationId = "com.tapnex.autoclicker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.3.0"
+        versionCode = 3
+        versionName = "0.4.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("boolean", "USE_TEST_ADS", "false")
         buildConfigField("String", "BANNER_AD_UNIT_ID", "\"$PROD_BANNER_AD_UNIT_ID\"")
+        buildConfigField("String", "REWARDED_AD_UNIT_ID", "\"$PROD_REWARDED_AD_UNIT_ID\"")
     }
 
     buildFeatures {
@@ -66,8 +74,9 @@ android {
         debug {
             // Debug builds always use Google test ads and never grant production credits.
             versionNameSuffix = "-debug"
-            buildConfigField("boolean", "USE_TEST_ADS", "true")
-            buildConfigField("String", "BANNER_AD_UNIT_ID", "\"$TEST_BANNER_AD_UNIT_ID\"")
+            buildConfigField("boolean", "USE_TEST_ADS", if (liveAdsInDebug) "false" else "true")
+            buildConfigField("String", "BANNER_AD_UNIT_ID", "\"${if (liveAdsInDebug) PROD_BANNER_AD_UNIT_ID else TEST_BANNER_AD_UNIT_ID}\"")
+            buildConfigField("String", "REWARDED_AD_UNIT_ID", "\"${if (liveAdsInDebug) PROD_REWARDED_AD_UNIT_ID else TEST_REWARDED_AD_UNIT_ID}\"")
         }
         release {
             isMinifyEnabled = true

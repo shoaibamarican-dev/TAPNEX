@@ -21,6 +21,8 @@ object FloatingSettings {
     private const val KEY_X = "pos_x"
     private const val KEY_Y = "pos_y"
     private const val KEY_LOCKED = "locked"
+    private const val KEY_SPEED_CUSTOM = "speed_custom"
+    private const val KEY_SHOW_POINTS = "show_points"
 
     data class Snapshot(
         val speed: Int,
@@ -28,7 +30,10 @@ object FloatingSettings {
         val hasPosition: Boolean,
         val x: Int,
         val y: Int,
-        val locked: Boolean
+        val locked: Boolean,
+        /** False until the user moves the speed slider; until then each point's own interval is used. */
+        val speedCustom: Boolean = false,
+        val showPoints: Boolean = true
     ) {
         val intervalMs: Long
             get() = speedToIntervalMs(speed)
@@ -50,12 +55,22 @@ object FloatingSettings {
             hasPosition = p.getBoolean(KEY_HAS_POSITION, false),
             x = p.getInt(KEY_X, 0),
             y = p.getInt(KEY_Y, 0),
-            locked = p.getBoolean(KEY_LOCKED, false)
+            locked = p.getBoolean(KEY_LOCKED, false),
+            speedCustom = p.getBoolean(KEY_SPEED_CUSTOM, false),
+            showPoints = p.getBoolean(KEY_SHOW_POINTS, true)
         )
     }
 
     fun saveSpeed(context: Context, speed: Int) {
-        prefs(context).edit().putInt(KEY_SPEED, speed.coerceIn(0, 100)).apply()
+        prefs(context).edit().putInt(KEY_SPEED, speed.coerceIn(0, 100)).putBoolean(KEY_SPEED_CUSTOM, true).apply()
+    }
+
+    fun clearSpeedCustom(context: Context) {
+        prefs(context).edit().putBoolean(KEY_SPEED_CUSTOM, false).apply()
+    }
+
+    fun saveShowPoints(context: Context, show: Boolean) {
+        prefs(context).edit().putBoolean(KEY_SHOW_POINTS, show).apply()
     }
 
     fun saveSizeDp(context: Context, sizeDp: Int) {

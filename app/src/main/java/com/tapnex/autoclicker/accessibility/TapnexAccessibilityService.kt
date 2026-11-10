@@ -3,11 +3,13 @@ package com.tapnex.autoclicker.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
-import com.tapnex.autoclicker.Permissions
-import com.tapnex.autoclicker.overlay.FloatingControlService
 import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.provider.Settings
+import com.tapnex.autoclicker.overlay.FloatingController
+import com.tapnex.autoclicker.overlay.ScreenUtil
 import android.view.accessibility.AccessibilityEvent
 import com.tapnex.autoclicker.model.ClickPoint
 import com.tapnex.autoclicker.model.PointStore
@@ -43,7 +45,6 @@ class TapnexAccessibilityService : AccessibilityService() {
         private set
 
     private var cursor = 0
-    private var permissionPromptedForTarget: String? = null
 
     // Incremented whenever the loop is started, stopped or resumed, so callbacks from an older loop are ignored.
     private var generation = 0L
@@ -55,28 +56,60 @@ class TapnexAccessibilityService : AccessibilityService() {
         instance = this
     }
 
+    // ---------------------------------------------------------------- floating controls
+
+    private var controller: FloatingController? = null
+
+    /** Ignore window events from these packages: they appear on top of games without leaving them. */
+    private val ignoredPackages = setOf(
+        "com.android.systemui",
+        "android",
+        "com.google.android.gms",
+        "com.android.permissioncontroller",
+        "com.miui.securitycenter",
+        "com.miui.gamebooster"
+    )
+
+    // After TAPNEX itself launches the target, events from the TAPNEX screen closing must not hide the controls.
+    private var graceUntil = 0L
+
+    fun showControls() {
+        if (controller != null) return
+        controller = FloatingController(this).also { it.show() }
+    }
+
+    fun hideControls() {
+        controller?.destroy()
+        controller = null
+        stopEngine()
+        intervalOverrideMs = null
+    }
+
+    /** Called by the TAPNEX app right after it launches the selected target app. */
+    fun onTargetLaunchedByApp() {
+        graceUntil = SystemClock.uptimeMillis() + 6000L
+        showControls()
+    }
+
+    private fun currentImePackage(): String? =
+        Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)?.substringBefore('/')
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Only observe the foreground package name. No screen text, nodes, or content are read.
-        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        // Only the foreground package name is read. No screen text, nodes, or content are read.
+        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val target = getSharedPreferences("tapnex_target", MODE_PRIVATE).getString("package", null) ?: return
-        val foregroundPackage = event.packageName?.toString() ?: return
-        if (foregroundPackage == target) {
-            if (Permissions.canDrawOverlay(this) && instance === this) {
-                runCatching { startForegroundService(Intent(this, FloatingControlService::class.java)) }
-                permissionPromptedForTarget = null
-            } else if (!Permissions.canDrawOverlay(this) && permissionPromptedForTarget != target) {
-                permissionPromptedForTarget = target
-                runCatching {
-                    startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:$packageName")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                }
-            }
-        } else {
-            permissionPromptedForTarget = null
-            // Any app other than the selected target (including TAPNEX itself) hides controls.
-            stopEngine()
-            stopService(Intent(this, FloatingControlService::class.java))
-            stopService(Intent(this, com.tapnex.autoclicker.overlay.SecondaryControlService::class.java))
+        val pkg = event.packageName?.toString() ?: return
+        val cls = event.className?.toString().orEmpty()
+
+        if (pkg == target) {
+            showControls()
+            return
         }
+        // Our own floating windows and ad screens are not "another app". Only the TAPNEX home screen is.
+        if (pkg == packageName && !cls.endsWith("MainActivity")) return
+        if (pkg in ignoredPackages || pkg == currentImePackage()) return
+        if (SystemClock.uptimeMillis() < graceUntil) return
+        hideControls()
     }
 
     override fun onInterrupt() {
@@ -84,13 +117,13 @@ class TapnexAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        stopEngine()
+        hideControls()
         instance = null
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        stopEngine()
+        hideControls()
         instance = null
         super.onDestroy()
     }
@@ -145,9 +178,9 @@ class TapnexAccessibilityService : AccessibilityService() {
         val point = active[cursor % active.size]
         cursor++
 
-        val dm = resources.displayMetrics
-        val x = (point.nx.coerceIn(0f, 1f) * dm.widthPixels).coerceIn(0f, (dm.widthPixels - 1).toFloat())
-        val y = (point.ny.coerceIn(0f, 1f) * dm.heightPixels).coerceIn(0f, (dm.heightPixels - 1).toFloat())
+        val (screenW, screenH) = ScreenUtil.realSize(this)
+        val x = (point.nx.coerceIn(0f, 1f) * screenW).coerceIn(0f, (screenW - 1).toFloat())
+        val y = (point.ny.coerceIn(0f, 1f) * screenH).coerceIn(0f, (screenH - 1).toFloat())
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 50))

@@ -1,7 +1,9 @@
 package com.tapnex.autoclicker
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
@@ -45,12 +47,11 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import androidx.navigation.compose.*
+import com.tapnex.autoclicker.accessibility.TapnexAccessibilityService
 import com.tapnex.autoclicker.ads.BannerAd
+import com.tapnex.autoclicker.ads.RewardedGate
 import com.tapnex.autoclicker.model.ClickPoint
 import com.tapnex.autoclicker.model.PointStore
-import com.tapnex.autoclicker.overlay.FloatingControlService
-import com.tapnex.autoclicker.overlay.SecondaryControlService
-import com.tapnex.autoclicker.settings.FloatingSettingsScreen
 import kotlinx.coroutines.delay
 
 /** Fixed TAPNEX look: dark base with red and yellow accents, white text. No theme chooser. */
@@ -89,6 +90,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        RewardedGate.preload(this)
         setContent {
             MaterialTheme(colorScheme = tapnexScheme) {
                 Surface(Modifier.fillMaxSize(), color = Tp.Bg) {
@@ -213,6 +215,7 @@ private fun BottomBar(selected: Int, onStart: () -> Unit, onHome: () -> Unit, on
 private fun HomeTab(refresh: Int, onOpenApps: () -> Unit, onOpenPoints: () -> Unit) {
     val ctx = LocalContext.current
     var packages by remember(refresh) { mutableStateOf(loadAddedApps(ctx)) }
+    var pendingPkg by remember { mutableStateOf<String?>(null) }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 8.dp),
@@ -245,7 +248,10 @@ private fun HomeTab(refresh: Int, onOpenApps: () -> Unit, onOpenPoints: () -> Un
         packages.forEach { pkg ->
             AppRow(
                 pkg = pkg,
-                onOpen = { openSelectedApp(ctx, pkg) },
+                onOpen = {
+                    RewardedGate.preload(ctx)
+                    pendingPkg = pkg
+                },
                 onRemove = {
                     packages = packages - pkg
                     saveAddedApps(ctx, packages)
@@ -255,7 +261,71 @@ private fun HomeTab(refresh: Int, onOpenApps: () -> Unit, onOpenPoints: () -> Un
         }
         BannerAd(Modifier.fillMaxWidth())
     }
+
+    pendingPkg?.let { pkg ->
+        UnlockDialog(
+            appLabel = appLabel(ctx, pkg),
+            onCancel = { pendingPkg = null },
+            onWatch = {
+                val activity = ctx.findActivity()
+                if (activity == null) {
+                    toast(ctx, "Could not show the ad.")
+                } else {
+                    RewardedGate.show(
+                        activity,
+                        onUnlocked = {
+                            pendingPkg = null
+                            openSelectedApp(ctx, pkg)
+                        },
+                        onUnavailable = { message -> toast(ctx, message) }
+                    )
+                }
+            }
+        )
+    }
 }
+
+@Composable
+private fun UnlockDialog(appLabel: String, onCancel: () -> Unit, onWatch: () -> Unit) {
+    val state = RewardedGate.state
+    AlertDialog(
+        onDismissRequest = onCancel,
+        containerColor = Tp.Card,
+        titleContentColor = Tp.White,
+        textContentColor = Tp.Muted,
+        title = { Text("Watch ad to unlock", fontWeight = FontWeight.Bold) },
+        text = { Text("Watch one short ad to unlock and open $appLabel with TAPNEX controls.") },
+        confirmButton = {
+            Button(
+                onClick = onWatch,
+                enabled = state != RewardedGate.State.LOADING,
+                colors = ButtonDefaults.buttonColors(containerColor = Tp.Red, contentColor = Tp.White)
+            ) {
+                Text(
+                    when (state) {
+                        RewardedGate.State.READY -> "Watch ad"
+                        RewardedGate.State.LOADING -> "Loading ad…"
+                        RewardedGate.State.FAILED -> "Retry"
+                    }
+                )
+            }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel", color = Tp.Muted) } }
+    )
+}
+
+private fun Context.findActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
+private fun appLabel(ctx: Context, pkg: String): String =
+    runCatching { ctx.packageManager.getApplicationLabel(ctx.packageManager.getApplicationInfo(pkg, 0)).toString() }
+        .getOrDefault(pkg)
 
 @Composable
 private fun LocalProfileTab() {
@@ -294,9 +364,6 @@ private fun SettingsTab(
     val ctx = LocalContext.current
     val overlayOk = remember(refresh) { Permissions.canDrawOverlay(ctx) }
     val accessibilityOk = remember(refresh) { Permissions.isAccessibilityEnabled(ctx) }
-    val notificationOk = remember(refresh) {
-        Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-    }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 8.dp),
@@ -305,23 +372,15 @@ private fun SettingsTab(
         Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Black)
         SectionCard("Permissions") {
             PermissionRow(
-                "Display over other apps", overlayOk,
+                "Display over other apps (optional)", overlayOk,
                 if (!overlayOk) { { ctx.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}"))) } } else null
             )
             PermissionRow(
                 "Accessibility service", accessibilityOk,
                 if (!accessibilityOk) { { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } } else null
             )
-            if (Build.VERSION.SDK_INT >= 33) {
-                PermissionRow(
-                    "Notifications", notificationOk,
-                    if (!notificationOk) { {
-                        ctx.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName))
-                    } } else null
-                )
-            }
             Text(
-                "TAPNEX needs these permissions to display floating controls, send your configured taps, and keep the service visible.",
+                "Accessibility is required: TAPNEX uses it to show the floating controls over your target app and to send your configured taps.",
                 color = Tp.Muted, fontSize = 12.sp
             )
         }
@@ -384,6 +443,12 @@ private fun openSelectedApp(ctx: Context, pkg: String) {
     }
     launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     runCatching { ctx.startActivity(launch) }
+        .onSuccess {
+            // Show the floating controls right away; the accessibility service keeps them in sync afterwards.
+            val svc = TapnexAccessibilityService.instance
+            if (svc != null) svc.onTargetLaunchedByApp()
+            else toast(ctx, "Turn on TAPNEX in Settings > Accessibility to get the floating controls.")
+        }
         .onFailure { toast(ctx, "Could not open this app.") }
 }
 
@@ -463,6 +528,7 @@ private fun AppPickerScreen(onBack: () -> Unit, onAppAdded: () -> Unit) {
 
 @Composable
 private fun PointEditorScreen(onBack: () -> Unit) {
+    val ctx = LocalContext.current
     var points by remember { mutableStateOf(PointStore.load()) }
 
     fun updatePoint(id: String, transform: (ClickPoint) -> ClickPoint) {
@@ -477,8 +543,11 @@ private fun PointEditorScreen(onBack: () -> Unit) {
         }
         Text("Positions are fractions of the screen (0 = left/top, 1 = right/bottom). Recheck them after rotation.", color = Tp.Muted, fontSize = 13.sp)
         Button(onClick = {
-            points = points + ClickPoint(label = "Point ${points.size + 1}", nx = .5f, ny = .5f)
+            val n = points.size
+            val offset = (n % 6) * 0.06f
+            points = points + ClickPoint(label = "Point ${n + 1}", nx = 0.5f + offset, ny = 0.5f + offset)
             PointStore.save(points)
+            toast(ctx, "Point ${n + 1} added. Open your game and drag its circle onto the target.")
         }, modifier = Modifier.fillMaxWidth()) { Text("Add point") }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(points, key = { it.id }) { point ->

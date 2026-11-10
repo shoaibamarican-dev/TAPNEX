@@ -17,7 +17,7 @@ This variant keeps the Android app project and removes Firebase Authentication, 
 - Firebase Firestore and Cloud Functions
 - Wallet, credits, and server-side session unlock
 
-There is no cloud account or sync. Clearing app data or uninstalling the app removes its locally stored settings. This source does not include a mandatory rewarded-ad gate before opening other apps; rewarded ads are opt-in and should not be used to force access to unrelated app functionality. It also does not include game-specific rapid-fire presets or anti-cheat bypasses.
+There is no cloud account or sync. Clearing app data or uninstalling the app removes its locally stored settings. Tapping an app in the App Library shows a "Watch ad to unlock" dialog (rewarded ad, with a Cancel option) before the app opens. Debug builds use Google test ads; release builds use the real TAPNEX AdMob units (set `TAPNEX_LIVE_ADS=true` to use real ads in debug too). The floating controls are drawn by the accessibility service (accessibility overlay), so they appear over games without the extra pop-up permissions. This source does not include game-specific rapid-fire presets or anti-cheat bypasses.
 
 ## Build the APK using GitHub (no local Android Studio required)
 
