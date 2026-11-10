@@ -30,8 +30,8 @@ android {
         applicationId = "com.tapnex.autoclicker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.4.0"
+        versionCode = 4
+        versionName = "0.5.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("boolean", "USE_TEST_ADS", "false")
         buildConfigField("String", "BANNER_AD_UNIT_ID", "\"$PROD_BANNER_AD_UNIT_ID\"")

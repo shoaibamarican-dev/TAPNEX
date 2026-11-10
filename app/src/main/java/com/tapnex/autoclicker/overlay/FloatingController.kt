@@ -17,6 +17,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.animation.OvershootInterpolator
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -34,26 +35,23 @@ import kotlin.math.min
 
 /**
  * TAPNEX floating UI: animated bubble, animated toggle menu and numbered click-point markers.
- *
- * It lives inside the accessibility service and uses TYPE_ACCESSIBILITY_OVERLAY windows. That type
- * needs no "display over other apps" permission, no foreground service and no MIUI pop-up permission,
- * so it appears reliably on top of games.
+ * Drawn with TYPE_ACCESSIBILITY_OVERLAY, so it needs no extra overlay permission and stays on top of games.
  */
 class FloatingController(private val svc: TapnexAccessibilityService) {
 
     companion object {
         private const val DRAG_SLOP_PX = 12f
-        private const val REFRESH_MS = 400L
-        private const val MINIMIZED_SCALE = 0.58f
-        private const val MENU_WIDTH_DP = 250
+        private const val REFRESH_MS = 250L
+        private const val MINIMIZED_SCALE = 0.6f
+        private const val MENU_WIDTH_DP = 260
         private const val MENU_GAP_DP = 10
-        private val COLOR_IDLE = Color.parseColor("#D91F2B")
-        private val COLOR_RUNNING = Color.parseColor("#F5B700")
-        private val COLOR_PAUSED = Color.parseColor("#FFFFFF")
-        private val COLOR_MUTED = Color.parseColor("#8E9AA3")
-        private val COLOR_CARD = Color.parseColor("#F2141B22")
-        private val COLOR_BTN = Color.parseColor("#2A343C")
-        private val COLOR_RED = Color.parseColor("#E53935")
+        private const val COLOR_IDLE = "#D91F2B"
+        private const val COLOR_RUNNING = "#F5B700"
+        private const val COLOR_PAUSED = "#FFFFFF"
+        private const val COLOR_MUTED = "#8E9AA3"
+        private const val COLOR_BTN = "#2A343C"
+        private const val COLOR_RED = "#E53935"
+        private const val COLOR_CARD = "#F2141B22"
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -64,14 +62,14 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
 
     private var destroyed = false
+    private var screen = Pair(0, 0)
 
     // Bubble
     private var bubble: ImageView? = null
     private var bubbleBg: GradientDrawable? = null
-    private var bubbleParams: WindowManager.LayoutParams? = null
-    private var baseSizePx = 0
+    private var bubbleLp: WindowManager.LayoutParams? = null
+    private var baseSize = 0
     private var minimized = false
-    private val bubbleLocked: Boolean get() = FloatingSettings.load(svc).locked
     private var pulse: ObjectAnimator? = null
     private var pulsing = false
     private var downRawX = 0f
@@ -81,49 +79,46 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
     private var moved = false
 
     // Menu
-    private var menuRoot: ScrollView? = null
+    private var menuView: ScrollView? = null
     private var menuCard: LinearLayout? = null
-    private var menuParams: WindowManager.LayoutParams? = null
-    private var menuShown = false
+    private var menuLp: WindowManager.LayoutParams? = null
+    private var menuOpen = false
     private var menuAttached = false
     private var statusText: TextView? = null
     private var statusDot: View? = null
-    private var autoSwitch: ToggleSwitch? = null
+    private var holdSwitch: ToggleSwitch? = null
     private var showSwitch: ToggleSwitch? = null
     private var lockSwitch: ToggleSwitch? = null
-    private var holdButton: TextView? = null
-    private var minimizeButton: TextView? = null
+    private var holdPill: TextView? = null
+    private var minimizeBtn: TextView? = null
     private var speedLabel: TextView? = null
     private var speedBar: SeekBar? = null
     private var speedTracking = false
-    private var holdStartedEngine = false
+    private var holding = false
 
     // Click point markers
     private val markers = mutableMapOf<String, TextView>()
     private var draggingId: String? = null
-
-    private var lastScreen = Pair(0, 0)
 
     private val refresh = object : Runnable {
         override fun run() {
             if (destroyed) return
             runCatching {
                 checkScreen()
-                applySpeed()
+                pushSpeed()
                 applyLiveSize()
                 syncMarkers()
-                updateColor()
-                syncMenu()
+                syncUi()
             }
             handler.postDelayed(this, REFRESH_MS)
         }
     }
 
-    // ------------------------------------------------------------------ lifecycle
+    // ------------------------------------------------------------ lifecycle
 
     fun show() {
         runCatching {
-            lastScreen = ScreenUtil.realSize(svc)
+            screen = ScreenUtil.realSize(svc)
             buildBubble()
             handler.post(refresh)
         }.onFailure { toast("Could not show TAPNEX controls.") }
@@ -134,26 +129,31 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
         handler.removeCallbacksAndMessages(null)
         pulse?.cancel()
         pulse = null
-        menuShown = false
-        menuRoot?.let { v ->
+        menuView?.let { v ->
             v.animate().cancel()
             if (menuAttached) runCatching { wm.removeView(v) }
         }
         menuAttached = false
+        menuOpen = false
         markers.values.forEach { runCatching { wm.removeView(it) } }
         markers.clear()
         bubble?.let { runCatching { wm.removeView(it) } }
         bubble = null
-        bubbleParams = null
-        bubbleBg = null
+        bubbleLp = null
     }
 
-    // ------------------------------------------------------------------ helpers
+    // ------------------------------------------------------------ helpers
 
     private fun dp(v: Int) = (v * d).toInt()
-    private fun screenW() = ScreenUtil.realSize(svc).first
-    private fun screenH() = ScreenUtil.realSize(svc).second
-    private fun toast(msg: String) = Toast.makeText(svc, msg, Toast.LENGTH_SHORT).show()
+    private fun toast(msg: String) {
+        Toast.makeText(svc, msg, Toast.LENGTH_SHORT).show()
+    }
+    private fun engineRunning() = svc.engineState != EngineState.IDLE
+
+    private fun clamp(x: Int, y: Int, w: Int, h: Int): Pair<Int, Int> = Pair(
+        x.coerceIn(0, (screen.first - w).coerceAtLeast(0)),
+        y.coerceIn(0, (screen.second - h).coerceAtLeast(0))
+    )
 
     private fun overlayParams(w: Int, h: Int): WindowManager.LayoutParams {
         val lp = WindowManager.LayoutParams(
@@ -166,86 +166,87 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
         return lp
     }
 
-    private fun clampToScreen(x: Int, y: Int, w: Int, h: Int): Pair<Int, Int> {
-        return Pair(
-            x.coerceIn(0, (screenW() - w).coerceAtLeast(0)),
-            y.coerceIn(0, (screenH() - h).coerceAtLeast(0))
-        )
-    }
-
-    private fun applySpeed() {
-        val s = FloatingSettings.load(svc)
-        // Until the user touches the speed slider, every point keeps its own interval.
-        svc.intervalOverrideMs = if (s.speedCustom) s.intervalMs else null
+    private fun pushSpeed() {
+        svc.intervalOverrideMs = FloatingSettings.speedToIntervalMs(FloatingSettings.load(svc).speed)
     }
 
     private fun checkScreen() {
         val now = ScreenUtil.realSize(svc)
-        if (now == lastScreen) return
-        lastScreen = now
+        if (now == screen) return
+        screen = now
+        val lp = bubbleLp
         val v = bubble
-        val lp = bubbleParams
-        if (v != null && lp != null) {
-            val pos = clampToScreen(lp.x, lp.y, lp.width, lp.height)
-            lp.x = pos.first
-            lp.y = pos.second
+        if (lp != null && v != null) {
+            val p = clamp(lp.x, lp.y, lp.width, lp.height)
+            lp.x = p.first
+            lp.y = p.second
             wm.updateViewLayout(v, lp)
         }
         positionMenu()
     }
 
-    // ------------------------------------------------------------------ bubble
+    // ------------------------------------------------------------ bubble
 
     private fun buildBubble() {
         if (bubble != null) return
-        val settings = FloatingSettings.load(svc)
-        baseSizePx = dp(settings.sizeDp)
-        val bg = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(COLOR_IDLE) }
+        val s = FloatingSettings.load(svc)
+        baseSize = dp(s.sizeDp)
+        val bg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor(COLOR_IDLE))
+        }
         bubbleBg = bg
         val view = ImageView(svc).apply {
             setImageResource(R.drawable.floating_icon)
             setPadding(dp(3), dp(3), dp(3), dp(3))
             background = bg
             contentDescription = "TAPNEX floating menu"
-            setOnTouchListener { v, event -> onBubbleTouch(v, event) }
+            setOnTouchListener { v, e -> onBubbleTouch(v, e) }
         }
         bubble = view
-        val pos = if (settings.hasPosition) {
-            clampToScreen(settings.x, settings.y, baseSizePx, baseSizePx)
+        val pos = if (s.hasPosition) {
+            clamp(s.x, s.y, baseSize, baseSize)
         } else {
-            clampToScreen(dp(24), dp(120), baseSizePx, baseSizePx)
+            clamp(dp(24), dp(120), baseSize, baseSize)
         }
-        val lp = overlayParams(baseSizePx, baseSizePx).apply { x = pos.first; y = pos.second }
-        bubbleParams = lp
+        val lp = overlayParams(baseSize, baseSize)
+        lp.x = pos.first
+        lp.y = pos.second
+        bubbleLp = lp
         wm.addView(view, lp)
-        view.scaleX = 0.6f; view.scaleY = 0.6f; view.alpha = 0f
-        view.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(320).start()
+        view.scaleX = 0.5f
+        view.scaleY = 0.5f
+        view.alpha = 0f
+        view.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(350)
+            .setInterpolator(OvershootInterpolator()).start()
     }
 
-    private fun onBubbleTouch(v: View, event: MotionEvent): Boolean {
-        val lp = bubbleParams ?: return false
-        when (event.action) {
+    private fun onBubbleTouch(v: View, e: MotionEvent): Boolean {
+        val lp = bubbleLp ?: return false
+        when (e.action) {
             MotionEvent.ACTION_DOWN -> {
-                downRawX = event.rawX; downRawY = event.rawY
-                startX = lp.x; startY = lp.y; moved = false
+                downRawX = e.rawX
+                downRawY = e.rawY
+                startX = lp.x
+                startY = lp.y
+                moved = false
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                val dx = event.rawX - downRawX
-                val dy = event.rawY - downRawY
+                val dx = e.rawX - downRawX
+                val dy = e.rawY - downRawY
                 if (!moved && (abs(dx) > DRAG_SLOP_PX || abs(dy) > DRAG_SLOP_PX)) moved = true
-                if (moved && !bubbleLocked) {
-                    val pos = clampToScreen(startX + dx.toInt(), startY + dy.toInt(), lp.width, lp.height)
-                    lp.x = pos.first; lp.y = pos.second
+                if (moved) {
+                    val p = clamp(startX + dx.toInt(), startY + dy.toInt(), lp.width, lp.height)
+                    lp.x = p.first
+                    lp.y = p.second
                     wm.updateViewLayout(v, lp)
                     positionMenu()
                 }
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                if (moved) {
-                    if (!bubbleLocked) FloatingSettings.savePosition(svc, lp.x, lp.y)
-                } else onBubbleTapped()
+                if (moved) FloatingSettings.savePosition(svc, lp.x, lp.y) else onBubbleTapped()
                 return true
             }
             MotionEvent.ACTION_CANCEL -> return true
@@ -255,34 +256,21 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
 
     private fun onBubbleTapped() {
         when {
-            minimized -> restoreSize()
-            svc.engineState == EngineState.RUNNING && !holdStartedEngine -> {
-                // Quick stop: one tap on the pulsing bubble ends auto clicking.
+            minimized -> setMinimized(false)
+            engineRunning() -> {
                 svc.stopEngine()
-                syncMarkers(); updateColor(); syncMenu()
-                toast("Auto click stopped.")
+                holding = false
+                syncUi()
+                toast("Clicking stopped.")
             }
-            menuShown -> hideMenu(true)
+            menuOpen -> hideMenu(true)
             else -> showMenu()
         }
     }
 
-    private fun updateColor() {
-        val state = svc.engineState
-        val color = when (state) {
-            EngineState.RUNNING -> COLOR_RUNNING
-            EngineState.PAUSED -> COLOR_PAUSED
-            else -> COLOR_IDLE
-        }
-        bubbleBg?.setColor(color)
-        (statusDot?.background as? GradientDrawable)?.setColor(color)
-        bubble?.invalidate()
-        setPulse(state == EngineState.RUNNING)
-    }
-
     private fun setPulse(on: Boolean) {
-        val b = bubble ?: return
         if (on == pulsing) return
+        val b = bubble ?: return
         pulsing = on
         if (on) {
             pulse = ObjectAnimator.ofPropertyValuesHolder(
@@ -290,7 +278,7 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
                 PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.12f),
                 PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.12f)
             ).apply {
-                duration = 600
+                duration = 500
                 repeatMode = ValueAnimator.REVERSE
                 repeatCount = ValueAnimator.INFINITE
                 start()
@@ -298,53 +286,68 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
         } else {
             pulse?.cancel()
             pulse = null
-            b.animate().scaleX(1f).scaleY(1f).setDuration(150).start()
+            b.scaleX = 1f
+            b.scaleY = 1f
         }
     }
 
-    private fun minimizeSize() { minimized = true; hideMenu(true); applyBubbleSize((baseSizePx * MINIMIZED_SCALE).toInt()) }
-    private fun restoreSize() { minimized = false; applyBubbleSize(baseSizePx) }
+    private fun setMinimized(m: Boolean) {
+        minimized = m
+        if (m) hideMenu(true)
+        applyBubbleSize(if (m) (baseSize * MINIMIZED_SCALE).toInt() else baseSize)
+        syncUi()
+    }
 
     private fun applyBubbleSize(px: Int) {
         val view = bubble ?: return
-        val lp = bubbleParams ?: return
-        val pos = clampToScreen(lp.x, lp.y, px, px)
-        lp.width = px; lp.height = px; lp.x = pos.first; lp.y = pos.second
+        val lp = bubbleLp ?: return
+        val p = clamp(lp.x, lp.y, px, px)
+        lp.width = px
+        lp.height = px
+        lp.x = p.first
+        lp.y = p.second
         wm.updateViewLayout(view, lp)
         positionMenu()
     }
 
     private fun applyLiveSize() {
-        val newBase = dp(FloatingSettings.load(svc).sizeDp)
-        if (bubble != null && newBase != baseSizePx) {
-            baseSizePx = newBase
-            if (!minimized) applyBubbleSize(baseSizePx)
+        val want = dp(FloatingSettings.load(svc).sizeDp)
+        if (bubble != null && want != baseSize) {
+            baseSize = want
+            if (!minimized) applyBubbleSize(baseSize)
         }
     }
 
-    // ------------------------------------------------------------------ menu
+    // ------------------------------------------------------------ menu building
 
-    private fun pressFx(v: View) {
-        v.setOnTouchListener { view, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> view.animate().scaleX(0.95f).scaleY(0.95f).setDuration(80).start()
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> view.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
-            }
-            false // let the click listener still run
-        }
+    private fun divider() = View(svc).apply {
+        setBackgroundColor(Color.parseColor("#22FFFFFF"))
     }
 
-    private fun pill(label: String, fill: Int): TextView = TextView(svc).apply {
+    private fun fullWidth(topDp: Int = 8) = LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+    ).apply { topMargin = dp(topDp) }
+
+    private fun pill(label: String, fill: String): TextView = TextView(svc).apply {
         text = label
         setTextColor(Color.WHITE)
         textSize = 13f
         typeface = Typeface.DEFAULT_BOLD
         gravity = Gravity.CENTER
-        background = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(fill) }
+        background = GradientDrawable().apply {
+            cornerRadius = dp(14).toFloat()
+            setColor(Color.parseColor(fill))
+        }
         minHeight = dp(40)
         setPadding(dp(10), 0, dp(10), 0)
         isClickable = true
-        pressFx(this)
+        setOnTouchListener { v, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> v.animate().scaleX(0.95f).scaleY(0.95f).setDuration(80).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+            }
+            false
+        }
     }
 
     private fun toggleRow(title: String, sub: String, onChange: (Boolean) -> Unit): Pair<View, ToggleSwitch> {
@@ -355,25 +358,22 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
         }
         val texts = LinearLayout(svc).apply { orientation = LinearLayout.VERTICAL }
         texts.addView(TextView(svc).apply {
-            text = title; setTextColor(Color.WHITE); textSize = 14f; typeface = Typeface.DEFAULT_BOLD
+            text = title
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
         })
-        texts.addView(TextView(svc).apply { text = sub; setTextColor(COLOR_MUTED); textSize = 11f })
+        texts.addView(TextView(svc).apply {
+            text = sub
+            setTextColor(Color.parseColor(COLOR_MUTED))
+            textSize = 11f
+        })
         val sw = ToggleSwitch(svc).apply { onChanged = onChange }
         row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(sw)
         row.setOnClickListener { sw.performClick() }
         return Pair(row, sw)
     }
-
-    private fun divider() = View(svc).apply {
-        setBackgroundColor(Color.parseColor("#22FFFFFF"))
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
-            topMargin = dp(2); bottomMargin = dp(2)
-        }
-    }
-
-    private fun fullWidth(topDp: Int = 8) =
-        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(topDp) }
 
     private fun buildMenu(): ScrollView {
         val pad = dp(14)
@@ -382,86 +382,125 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
             setPadding(pad, pad, pad, pad)
             background = GradientDrawable().apply {
                 cornerRadius = dp(22).toFloat()
-                setColor(COLOR_CARD)
+                setColor(Color.parseColor(COLOR_CARD))
                 setStroke(dp(1), Color.parseColor("#33FFFFFF"))
             }
         }
 
-        // Header: status dot, title, state text
-        val header = LinearLayout(svc).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val dot = View(svc).apply {
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(COLOR_IDLE) }
+        // Header
+        val header = LinearLayout(svc).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        statusDot = dot
-        header.addView(dot, LinearLayout.LayoutParams(dp(10), dp(10)).apply { rightMargin = dp(8) })
-        header.addView(TextView(svc).apply {
-            text = "TAPNEX"; setTextColor(COLOR_RED); textSize = 17f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        statusText = TextView(svc).apply { text = "Ready"; setTextColor(COLOR_MUTED); textSize = 12f }
+        statusDot = View(svc).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor(COLOR_IDLE))
+            }
+        }
+        header.addView(statusDot, LinearLayout.LayoutParams(dp(10), dp(10)).apply { rightMargin = dp(8) })
+        header.addView(
+            TextView(svc).apply {
+                text = "TAPNEX"
+                setTextColor(Color.parseColor(COLOR_RED))
+                textSize = 17f
+                typeface = Typeface.DEFAULT_BOLD
+            },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        statusText = TextView(svc).apply {
+            text = "Ready"
+            setTextColor(Color.parseColor(COLOR_MUTED))
+            textSize = 12f
+        }
         header.addView(statusText)
         card.addView(header)
-        card.addView(divider(), fullWidth(6))
+        card.addView(divider(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply { topMargin = dp(6) })
 
         // Toggles
-        val auto = toggleRow("Auto Click", "Taps your points in order") { on -> onAutoToggled(on) }
-        autoSwitch = auto.second
-        card.addView(auto.first)
+        val hold = toggleRow("Hold to Click", "Turn on, then press & hold the button") { on ->
+            FloatingSettings.saveHold(svc, on)
+            if (!on && engineRunning()) svc.stopEngine()
+            syncUi()
+        }
+        holdSwitch = hold.second
+        card.addView(hold.first)
+
         val show = toggleRow("Show Points", "Numbered circles on screen") { on ->
             FloatingSettings.saveShowPoints(svc, on)
             syncMarkers()
+            syncUi()
         }
         showSwitch = show.second
         card.addView(show.first)
-        val lock = toggleRow("Lock Points", "Taps pass through, no dragging") { on -> setAllLocked(on) }
+
+        val lock = toggleRow("Lock Points", "Taps pass through, no dragging") { on ->
+            val pts = PointStore.load()
+            if (pts.isEmpty()) {
+                toast("Add a point first.")
+            } else {
+                PointStore.save(pts.map { it.copy(locked = on) })
+                syncMarkers()
+            }
+            syncUi()
+        }
         lockSwitch = lock.second
         card.addView(lock.first)
-        card.addView(divider(), fullWidth(4))
 
-        // Point buttons
+        // Hold button
+        holdPill = pill("HOLD TO CLICK", COLOR_BTN).also { p ->
+            p.setOnTouchListener { v, e -> onHoldTouch(v, e) }
+            card.addView(p, fullWidth(8))
+        }
+
+        // Points
         val pointRow = LinearLayout(svc).apply { orientation = LinearLayout.HORIZONTAL }
-        val add = pill("+ Add Point", COLOR_RED).also { it.setOnClickListener { addPoint() } }
-        val remove = pill("− Remove", COLOR_BTN).also { it.setOnClickListener { removeLastPoint() } }
-        pointRow.addView(add, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.3f).apply { rightMargin = dp(6) })
-        pointRow.addView(remove, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        pointRow.addView(
+            pill("+ Add Point", COLOR_RED).also { p -> p.setOnClickListener { addPoint() } },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.3f).apply { rightMargin = dp(6) }
+        )
+        pointRow.addView(
+            pill("− Remove", COLOR_BTN).also { p -> p.setOnClickListener { removeLastPoint() } },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
         card.addView(pointRow, fullWidth(8))
-
-        // Hold to click
-        holdButton = pill("Hold to Click", COLOR_BTN).also { card.addView(it, fullWidth(8)); setupHoldButton(it) }
 
         // Speed
         speedLabel = TextView(svc).apply {
-            setTextColor(Color.WHITE); textSize = 13f; typeface = Typeface.DEFAULT_BOLD
-            setOnClickListener {
-                FloatingSettings.clearSpeedCustom(svc)
-                applySpeed(); syncMenu()
-                toast("Speed: using each point's own timing.")
-            }
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
         }
         card.addView(speedLabel, fullWidth(10))
         speedBar = SeekBar(svc).apply {
-            max = 100
-            progressTintList = ColorStateList.valueOf(COLOR_RED)
+            max = FloatingSettings.MAX_SPEED
+            progressTintList = ColorStateList.valueOf(Color.parseColor(COLOR_RED))
             thumbTintList = ColorStateList.valueOf(Color.WHITE)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
                     if (!fromUser) return
-                    FloatingSettings.saveSpeed(svc, value)
-                    applySpeed()
-                    speedLabel?.text = speedText(FloatingSettings.load(svc))
+                    FloatingSettings.saveSpeed(svc, value.coerceAtLeast(FloatingSettings.MIN_SPEED))
+                    syncSpeedText()
                 }
-                override fun onStartTrackingTouch(bar: SeekBar?) { speedTracking = true }
-                override fun onStopTrackingTouch(bar: SeekBar?) { speedTracking = false }
+                override fun onStartTrackingTouch(bar: SeekBar?) {
+                    speedTracking = true
+                }
+                override fun onStopTrackingTouch(bar: SeekBar?) {
+                    speedTracking = false
+                }
             })
         }
         card.addView(speedBar, fullWidth(2))
-        card.addView(divider(), fullWidth(6))
 
         // Bottom row
+        card.addView(divider(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply { topMargin = dp(6) })
         val bottom = LinearLayout(svc).apply { orientation = LinearLayout.HORIZONTAL }
-        minimizeButton = pill("Minimize", COLOR_BTN).also { it.setOnClickListener { if (minimized) restoreSize() else minimizeSize() } }
-        val close = pill("Close menu", COLOR_BTN).also { it.setOnClickListener { hideMenu(true) } }
-        bottom.addView(minimizeButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
-        bottom.addView(close, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        minimizeBtn = pill("Minimize", COLOR_BTN).also { p -> p.setOnClickListener { setMinimized(!minimized) } }
+        bottom.addView(minimizeBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
+        bottom.addView(
+            pill("Close menu", COLOR_BTN).also { p -> p.setOnClickListener { hideMenu(true) } },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
         card.addView(bottom, fullWidth(8))
 
         menuCard = card
@@ -472,189 +511,191 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
         }
     }
 
-    private fun setupHoldButton(button: TextView) {
-        button.setOnTouchListener { view, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    view.animate().scaleX(0.95f).scaleY(0.95f).setDuration(80).start()
-                    holdStartedEngine = svc.engineState == EngineState.IDLE
-                    if (holdStartedEngine) {
-                        applySpeed()
-                        val error = svc.startEngine(TapnexAccessibilityService.OWNER_MAIN)
-                        if (error != null) {
-                            holdStartedEngine = false
-                            toast(error)
-                        } else {
-                            syncMarkers()
-                        }
-                    }
-                    updateColor(); syncMenu()
-                    true
+    /** Press and hold to click: clicking runs while the finger is down and stops on release. */
+    private fun onHoldTouch(v: View, e: MotionEvent): Boolean {
+        when (e.action) {
+            MotionEvent.ACTION_DOWN -> {
+                if (!FloatingSettings.load(svc).holdEnabled) {
+                    toast("Turn on Hold to Click first.")
+                    return true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    view.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
-                    if (holdStartedEngine) svc.stopEngine()
-                    holdStartedEngine = false
-                    syncMarkers(); updateColor(); syncMenu()
-                    view.performClick()
-                    true
+                val err = svc.startEngine(TapnexAccessibilityService.OWNER_MAIN)
+                if (err != null) {
+                    toast(err)
+                    return true
                 }
-                else -> true
+                holding = true
+                v.animate().scaleX(0.95f).scaleY(0.95f).setDuration(80).start()
+                syncUi()
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+                if (holding) {
+                    svc.stopEngine()
+                    holding = false
+                }
+                syncUi()
+                return true
             }
         }
+        return true
     }
 
-    private fun speedText(s: FloatingSettings.Snapshot): String =
-        if (s.speedCustom) "Speed: ${s.speed}%  (tap here = auto)" else "Speed: Auto (point timing)"
+    private fun syncSpeedText() {
+        val s = FloatingSettings.load(svc)
+        speedLabel?.text = "Speed: ${s.speed} / ${FloatingSettings.MAX_SPEED}  •  ${s.intervalMs} ms"
+    }
 
-    private fun syncMenu() {
+    /** Pushes stored settings and engine state into the visible controls. Safe to call often. */
+    private fun syncUi() {
         val s = FloatingSettings.load(svc)
         val state = svc.engineState
+        val colorName = when (state) {
+            EngineState.RUNNING -> COLOR_RUNNING
+            EngineState.PAUSED -> COLOR_PAUSED
+            else -> COLOR_IDLE
+        }
+        val colorInt = Color.parseColor(colorName)
+        bubbleBg?.setColor(colorInt)
+        (statusDot?.background as? GradientDrawable)?.setColor(colorInt)
         statusText?.text = when (state) {
             EngineState.RUNNING -> "Clicking"
             EngineState.PAUSED -> "Paused"
             else -> "Ready"
         }
-        autoSwitch?.setChecked(state == EngineState.RUNNING && !holdStartedEngine, true)
-        showSwitch?.setChecked(s.showPoints, true)
+        setPulse(state == EngineState.RUNNING)
+
         val pts = PointStore.load()
+        holdSwitch?.setChecked(s.holdEnabled, true)
+        showSwitch?.setChecked(s.showPoints, true)
         lockSwitch?.setChecked(pts.isNotEmpty() && pts.all { it.locked }, true)
-        holdButton?.text = if (holdStartedEngine && state == EngineState.RUNNING) "Release to Stop" else "Hold to Click"
-        minimizeButton?.text = if (minimized) "Restore" else "Minimize"
-        if (!speedTracking) {
-            speedLabel?.text = speedText(s)
-            val target = if (s.speedCustom) s.speed else 50
-            if (speedBar?.progress != target) speedBar?.progress = target
+        holdPill?.let {
+            it.alpha = if (s.holdEnabled) 1f else 0.4f
+            it.text = if (holding) "RELEASE TO STOP" else "HOLD TO CLICK"
         }
+        minimizeBtn?.text = if (minimized) "Restore" else "Minimize"
+        if (!speedTracking) speedBar?.progress = s.speed
+        syncSpeedText()
     }
+
+    // ------------------------------------------------------------ menu show / hide
 
     private fun computeMenuLayout(lp: WindowManager.LayoutParams) {
         val card = menuCard ?: return
-        val bLp = bubbleParams ?: return
+        val b = bubbleLp ?: return
         val gap = dp(MENU_GAP_DP)
-        val sw = screenW()
-        val sh = screenH()
-        val w = min(dp(MENU_WIDTH_DP), sw - 2 * gap)
+        val sw = screen.first
+        val sh = screen.second
+        val w = min(dp(MENU_WIDTH_DP), sw - 2 * gap).coerceAtLeast(dp(200))
         card.measure(
             View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         )
-        val h = min(card.measuredHeight, sh - 2 * dp(8))
-        val right = bLp.x + bLp.width + gap
+        val h = min(card.measuredHeight, sh - dp(16)).coerceAtLeast(dp(120))
+        val right = b.x + b.width + gap
         lp.width = w
         lp.height = h
-        lp.x = (if (right + w <= sw) right else bLp.x - w - gap).coerceIn(0, (sw - w).coerceAtLeast(0))
-        lp.y = bLp.y.coerceIn(0, (sh - h).coerceAtLeast(0))
+        lp.x = (if (right + w <= sw) right else b.x - w - gap).coerceIn(0, (sw - w).coerceAtLeast(0))
+        lp.y = b.y.coerceIn(0, (sh - h).coerceAtLeast(0))
     }
 
     private fun showMenu() {
-        if (menuShown || destroyed) return
-        val view = menuRoot ?: buildMenu().also { menuRoot = it }
+        if (menuOpen || destroyed) return
+        val view = menuView ?: buildMenu().also { menuView = it }
         view.animate().cancel()
+        syncUi()
         val lp = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT)
-        syncMenu()
         computeMenuLayout(lp)
-        if (menuAttached) wm.updateViewLayout(view, lp) else { wm.addView(view, lp); menuAttached = true }
-        menuParams = lp
-        menuShown = true
-        view.alpha = 0f; view.scaleX = 0.88f; view.scaleY = 0.88f
-        view.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start()
-        bubble?.animate()?.rotationBy(135f)?.setDuration(200)?.start()
-        // Rows slide in one after another.
+        if (menuAttached) {
+            wm.updateViewLayout(view, lp)
+        } else {
+            wm.addView(view, lp)
+            menuAttached = true
+        }
+        menuLp = lp
+        menuOpen = true
+        view.alpha = 0f
+        view.scaleX = 0.85f
+        view.scaleY = 0.85f
+        view.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(220)
+            .setInterpolator(OvershootInterpolator(0.8f)).start()
+        bubble?.animate()?.rotation(135f)?.setDuration(220)?.start()
+        // Each row fades and slides in one after another.
         menuCard?.let { card ->
             for (i in 0 until card.childCount) {
-                val child = card.getChildAt(i)
-                child.alpha = 0f
-                child.translationY = dp(10).toFloat()
-                child.animate().alpha(1f).translationY(0f).setStartDelay(40L * i).setDuration(220).start()
+                val c = card.getChildAt(i)
+                c.alpha = 0f
+                c.translationY = dp(8).toFloat()
+                c.animate().alpha(1f).translationY(0f).setStartDelay(30L * i).setDuration(200).start()
             }
         }
     }
 
     private fun hideMenu(animated: Boolean) {
-        if (!menuShown) return
-        val view = menuRoot ?: return
-        menuShown = false
-        val finish = {
-            if (!menuShown && menuAttached) {
+        if (!menuOpen) return
+        val view = menuView ?: return
+        menuOpen = false
+        val finish = Runnable {
+            if (!menuOpen && menuAttached) {
                 runCatching { wm.removeView(view) }
                 menuAttached = false
             }
         }
-        if (animated) view.animate().alpha(0f).scaleX(0.88f).scaleY(0.88f).setDuration(150).withEndAction(finish).start()
-        else finish()
-        bubble?.animate()?.rotation(0f)?.setDuration(150)?.start()
+        if (animated) {
+            view.animate().alpha(0f).scaleX(0.85f).scaleY(0.85f).setDuration(160)
+                .withEndAction(finish).start()
+        } else {
+            finish.run()
+        }
+        bubble?.animate()?.rotation(0f)?.setDuration(160)?.start()
     }
 
     private fun positionMenu() {
-        if (!menuShown) return
-        val view = menuRoot ?: return
-        val lp = menuParams ?: return
+        if (!menuOpen) return
+        val view = menuView ?: return
+        val lp = menuLp ?: return
         computeMenuLayout(lp)
         runCatching { wm.updateViewLayout(view, lp) }
     }
 
-    // ------------------------------------------------------------------ actions
-
-    private fun onAutoToggled(on: Boolean) {
-        if (on) {
-            applySpeed()
-            val error = svc.startEngine(TapnexAccessibilityService.OWNER_MAIN)
-            if (error != null) {
-                toast(error)
-                autoSwitch?.setChecked(false, true)
-            } else {
-                syncMarkers() // markers become tap-through before the first tap
-                hideMenu(true) // keep the menu from sitting on top of a tap point
-                toast("Auto click started. Tap the pulsing bubble to stop.")
-            }
-        } else {
-            svc.stopEngine()
-            syncMarkers()
-        }
-        updateColor()
-    }
+    // ------------------------------------------------------------ point actions
 
     private fun addPoint() {
         val pts = PointStore.load()
-        val n = pts.size
-        val off = (n % 6) * 0.06f
-        val p = ClickPoint(label = "Point ${n + 1}", nx = (0.5f + off).coerceIn(0f, 1f), ny = (0.5f + off).coerceIn(0f, 1f))
-        PointStore.save(pts + p)
-        if (!FloatingSettings.load(svc).showPoints) {
-            FloatingSettings.saveShowPoints(svc, true)
-        }
+        val n = pts.size + 1
+        val off = ((n - 1) % 6) * 0.06f
+        PointStore.save(pts + ClickPoint(label = "Point $n", nx = 0.5f + off, ny = 0.5f + off))
+        if (!FloatingSettings.load(svc).showPoints) FloatingSettings.saveShowPoints(svc, true)
         syncMarkers()
-        syncMenu()
         hideMenu(true)
-        toast("Point ${n + 1} added. Drag the red circle onto the target.")
+        toast("Point $n added. Drag the circle onto the target.")
     }
 
     private fun removeLastPoint() {
         val pts = PointStore.load()
-        if (pts.isEmpty()) { toast("No points to remove."); return }
+        if (pts.isEmpty()) {
+            toast("No points to remove.")
+            return
+        }
         PointStore.save(pts.dropLast(1))
         syncMarkers()
-        toast("Point removed.")
+        syncUi()
     }
 
-    private fun setAllLocked(lock: Boolean) {
-        PointStore.save(PointStore.load().map { it.copy(locked = lock) })
-        syncMarkers()
-        toast(if (lock) "Points locked." else "Points unlocked.")
-    }
+    // ------------------------------------------------------------ click point markers
 
-    // ------------------------------------------------------------------ click point markers
+    private fun touchableFor(point: ClickPoint, running: Boolean) = !running && !point.locked
 
     private fun syncMarkers() {
-        val settings = FloatingSettings.load(svc)
+        val s = FloatingSettings.load(svc)
         val all = PointStore.load().filter { it.enabled }
-        val visible = if (settings.showPoints) all else emptyList()
+        val visible = if (s.showPoints) all else emptyList()
         val ids = visible.map { it.id }.toSet()
-        markers.keys.filter { it !in ids }.toList().forEach { id ->
+        markers.keys.filter { it !in ids }.forEach { id ->
             markers.remove(id)?.let { runCatching { wm.removeView(it) } }
         }
-        val running = svc.engineState != EngineState.IDLE
+        val running = engineRunning()
         visible.forEachIndexed { index, point ->
             val view = markers[point.id]
             if (view == null) addMarker(point, index, running) else updateMarker(view, point, index, running)
@@ -663,39 +704,47 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
 
     private fun addMarker(point: ClickPoint, index: Int, running: Boolean) {
         val size = dp(point.sizeDp)
-        val bg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(Color.RED)
-            setStroke(dp(2), Color.WHITE)
-        }
         val view = TextView(svc).apply {
             text = (index + 1).toString()
             setTextColor(Color.WHITE)
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = bg
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.RED)
+                setStroke(dp(2), Color.WHITE)
+            }
             alpha = point.opacityPercent / 100f
             contentDescription = point.label
         }
-        var downX = 0f; var downY = 0f; var sx = 0; var sy = 0; var movedHere = false
+        var downX = 0f
+        var downY = 0f
+        var startPx = 0
+        var startPy = 0
+        var touchMoved = false
         view.setOnTouchListener { v, event ->
             val current = PointStore.load().firstOrNull { it.id == point.id } ?: return@setOnTouchListener true
             val lp = v.layoutParams as WindowManager.LayoutParams
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    downX = event.rawX; downY = event.rawY; sx = lp.x; sy = lp.y; movedHere = false
+                    downX = event.rawX
+                    downY = event.rawY
+                    startPx = lp.x
+                    startPy = lp.y
+                    touchMoved = false
                     draggingId = point.id
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = event.rawX - downX
-                    val dy = event.rawY - downY
                     if (!current.locked) {
-                        if (abs(dx) > DRAG_SLOP_PX || abs(dy) > DRAG_SLOP_PX) movedHere = true
-                        if (movedHere) {
-                            val pos = clampToScreen(sx + dx.toInt(), sy + dy.toInt(), lp.width, lp.height)
-                            lp.x = pos.first; lp.y = pos.second
+                        val dx = event.rawX - downX
+                        val dy = event.rawY - downY
+                        if (!touchMoved && (abs(dx) > DRAG_SLOP_PX || abs(dy) > DRAG_SLOP_PX)) touchMoved = true
+                        if (touchMoved) {
+                            val p = clamp(startPx + dx.toInt(), startPy + dy.toInt(), lp.width, lp.height)
+                            lp.x = p.first
+                            lp.y = p.second
                             wm.updateViewLayout(v, lp)
                         }
                     }
@@ -703,51 +752,60 @@ class FloatingController(private val svc: TapnexAccessibilityService) {
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     draggingId = null
-                    if (movedHere && !current.locked) {
-                        val nx = ((lp.x + lp.width / 2f) / screenW()).coerceIn(0f, 1f)
-                        val ny = ((lp.y + lp.height / 2f) / screenH()).coerceIn(0f, 1f)
-                        PointStore.save(PointStore.load().map { if (it.id == current.id) it.copy(nx = nx, ny = ny) else it })
+                    if (touchMoved && !current.locked) {
+                        val nx = ((lp.x + lp.width / 2f) / screen.first).coerceIn(0f, 1f)
+                        val ny = ((lp.y + lp.height / 2f) / screen.second).coerceIn(0f, 1f)
+                        PointStore.save(PointStore.load().map {
+                            if (it.id == current.id) it.copy(nx = nx, ny = ny) else it
+                        })
                     }
                     true
                 }
                 else -> true
             }
         }
-        val pos = clampToScreen(
-            (point.nx * screenW() - size / 2f).toInt(), (point.ny * screenH() - size / 2f).toInt(), size, size
+        val pos = clamp(
+            (point.nx * screen.first - size / 2f).toInt(),
+            (point.ny * screen.second - size / 2f).toInt(),
+            size, size
         )
-        val lp = overlayParams(size, size).apply {
-            x = pos.first; y = pos.second
-            if (!touchableFor(point, running)) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        }
+        val lp = overlayParams(size, size)
+        lp.x = pos.first
+        lp.y = pos.second
+        if (!touchableFor(point, running)) lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         markers[point.id] = view
-        wm.addView(view, lp)
+        runCatching { wm.addView(view, lp) }.onFailure { markers.remove(point.id) }
     }
-
-    /** Markers must not catch touches while tapping (they would swallow the injected taps) or when locked. */
-    private fun touchableFor(point: ClickPoint, running: Boolean) = !running && !point.locked
 
     private fun updateMarker(view: TextView, point: ClickPoint, index: Int, running: Boolean) {
         val lp = view.layoutParams as? WindowManager.LayoutParams ?: return
         var changed = false
         val size = dp(point.sizeDp)
         if (draggingId != point.id) {
-            val pos = clampToScreen(
-                (point.nx * screenW() - size / 2f).toInt(), (point.ny * screenH() - size / 2f).toInt(), size, size
+            val pos = clamp(
+                (point.nx * screen.first - size / 2f).toInt(),
+                (point.ny * screen.second - size / 2f).toInt(),
+                size, size
             )
             if (lp.width != size || lp.height != size || lp.x != pos.first || lp.y != pos.second) {
-                lp.width = size; lp.height = size; lp.x = pos.first; lp.y = pos.second
+                lp.width = size
+                lp.height = size
+                lp.x = pos.first
+                lp.y = pos.second
                 changed = true
             }
         }
         val wantNotTouchable = !touchableFor(point, running)
         val isNotTouchable = (lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0
         if (wantNotTouchable != isNotTouchable) {
-            lp.flags = if (wantNotTouchable) lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            else lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            lp.flags = if (wantNotTouchable) {
+                lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            } else {
+                lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            }
             changed = true
         }
-        if (changed) wm.updateViewLayout(view, lp)
+        if (changed) runCatching { wm.updateViewLayout(view, lp) }
         view.alpha = point.opacityPercent / 100f
         val label = (index + 1).toString()
         if (view.text.toString() != label) view.text = label

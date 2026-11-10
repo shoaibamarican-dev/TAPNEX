@@ -49,6 +49,7 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.navigation.compose.*
 import com.tapnex.autoclicker.accessibility.TapnexAccessibilityService
 import com.tapnex.autoclicker.ads.BannerAd
+import com.tapnex.autoclicker.gate.SubscribeGateScreen
 import com.tapnex.autoclicker.ads.RewardedGate
 import com.tapnex.autoclicker.model.ClickPoint
 import com.tapnex.autoclicker.model.PointStore
@@ -112,7 +113,12 @@ private fun TapnexApp(refresh: Int) {
     NavHost(navController = nav, startDestination = "splash") {
         composable("splash") {
             SplashScreen(onDone = {
-                nav.navigate("main") { popUpTo("splash") { inclusive = true } }
+                nav.navigate("gate") { popUpTo("splash") { inclusive = true } }
+            })
+        }
+        composable("gate") {
+            SubscribeGateScreen(onDone = {
+                nav.navigate("main") { popUpTo("gate") { inclusive = true } }
             })
         }
         composable("main") {

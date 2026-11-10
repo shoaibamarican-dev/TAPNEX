@@ -5,7 +5,7 @@ import android.hardware.display.DisplayManager
 import android.util.DisplayMetrics
 import android.view.Display
 
-/** Real physical screen size in pixels for the current rotation (includes status bar and cutout). */
+/** Real screen size in pixels for the current rotation (includes status bar and cutout). */
 object ScreenUtil {
     fun realSize(context: Context): Pair<Int, Int> {
         val dm = DisplayMetrics()

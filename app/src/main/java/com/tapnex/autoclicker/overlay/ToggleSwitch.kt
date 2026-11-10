@@ -8,15 +8,15 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.view.View
 
-/** Small animated on/off switch drawn by hand so it works inside overlay windows without a theme. */
+/** Animated on/off switch drawn by hand so it works inside overlay windows. */
 class ToggleSwitch(context: Context) : View(context) {
     var onChanged: ((Boolean) -> Unit)? = null
     var checked = false
         private set
 
+    private val d = context.resources.displayMetrics.density
     private var progress = 0f
     private var anim: ValueAnimator? = null
-    private val d = context.resources.displayMetrics.density
     private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val thumbPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val evaluator = ArgbEvaluator()
@@ -25,24 +25,25 @@ class ToggleSwitch(context: Context) : View(context) {
 
     init {
         setOnClickListener {
-            setChecked(!checked, true)
-            onChanged?.invoke(checked)
+            val next = !checked
+            setChecked(next, true)
+            onChanged?.invoke(next)
         }
     }
 
-    /** Changes the visual state only. Does not call onChanged. */
+    /** Visual state only; does not call onChanged. Safe to call every refresh. */
     fun setChecked(value: Boolean, animate: Boolean) {
-        if (checked == value) return
+        val target = if (value) 1f else 0f
+        if (checked == value && (anim?.isRunning == true || progress == target)) return
         checked = value
         anim?.cancel()
-        val target = if (value) 1f else 0f
         if (!animate) {
             progress = target
             invalidate()
             return
         }
         anim = ValueAnimator.ofFloat(progress, target).apply {
-            duration = 200
+            duration = 180
             addUpdateListener {
                 progress = it.animatedValue as Float
                 invalidate()

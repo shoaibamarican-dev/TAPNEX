@@ -8,11 +8,12 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
-import com.tapnex.autoclicker.overlay.FloatingController
-import com.tapnex.autoclicker.overlay.ScreenUtil
 import android.view.accessibility.AccessibilityEvent
 import com.tapnex.autoclicker.model.ClickPoint
 import com.tapnex.autoclicker.model.PointStore
+import com.tapnex.autoclicker.overlay.FloatingController
+import com.tapnex.autoclicker.overlay.ScreenUtil
+import com.tapnex.autoclicker.overlay.SecondaryControlService
 
 /**
  * Dispatches only the user-configured tap points. Foreground detection reads only the package name;
@@ -23,11 +24,10 @@ class TapnexAccessibilityService : AccessibilityService() {
     enum class EngineState { IDLE, RUNNING, PAUSED }
 
     companion object {
-        /** Owner ids: which floating control started the current tap session. */
         const val OWNER_MAIN = "main"
         const val OWNER_SECOND = "second"
 
-        /** Non-null only while the system has connected this service. Used by the overlay. */
+        /** Non-null only while the system has connected this service. */
         @Volatile
         var instance: TapnexAccessibilityService? = null
             private set
@@ -39,28 +39,23 @@ class TapnexAccessibilityService : AccessibilityService() {
     var engineState: EngineState = EngineState.IDLE
         private set
 
-    /** Which floating control started the current session, or null when idle. */
     @Volatile
     var sessionOwner: String? = null
         private set
 
+    /** When set, replaces each point's own interval (speed slider). */
+    @Volatile
+    var intervalOverrideMs: Long? = null
+
     private var cursor = 0
-
-    // Incremented whenever the loop is started, stopped or resumed, so callbacks from an older loop are ignored.
     private var generation = 0L
-
     private val tick = Runnable { dispatchNext(generation) }
 
-    override fun onServiceConnected() {
-        super.onServiceConnected()
-        instance = this
-    }
-
-    // ---------------------------------------------------------------- floating controls
-
     private var controller: FloatingController? = null
+    private var foreground: String? = null
+    private var graceUntil = 0L
 
-    /** Ignore window events from these packages: they appear on top of games without leaving them. */
+    /** Packages whose windows (notifications, IME, system dialogs) must not count as a foreground change. */
     private val ignoredPackages = setOf(
         "com.android.systemui",
         "android",
@@ -70,8 +65,40 @@ class TapnexAccessibilityService : AccessibilityService() {
         "com.miui.gamebooster"
     )
 
-    // After TAPNEX itself launches the target, events from the TAPNEX screen closing must not hide the controls.
-    private var graceUntil = 0L
+    /** Runs after a short delay when a real other app came to the front; hides the controls only if it stays. */
+    private val hideCheck = Runnable {
+        if (foreground != targetPackage() && SystemClock.uptimeMillis() >= graceUntil) hideControls()
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+    }
+
+    private fun targetPackage(): String? =
+        getSharedPreferences("tapnex_target", MODE_PRIVATE).getString("package", null)
+
+    private fun currentImePackage(): String? =
+        Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)?.substringBefore('/')
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        val pkg = event.packageName?.toString() ?: return
+        val cls = event.className?.toString().orEmpty()
+        // Our own floating windows are not a foreground change; the TAPNEX home screen is.
+        if (pkg == packageName && !cls.endsWith("MainActivity")) return
+        if (pkg in ignoredPackages || pkg == currentImePackage()) return
+
+        foreground = pkg
+        handler.removeCallbacks(hideCheck)
+        if (pkg == targetPackage()) {
+            showControls()
+        } else {
+            handler.postDelayed(hideCheck, 600L)
+        }
+    }
+
+    // ---------------------------------------------------------------- floating controls
 
     fun showControls() {
         if (controller != null) return
@@ -83,33 +110,12 @@ class TapnexAccessibilityService : AccessibilityService() {
         controller = null
         stopEngine()
         intervalOverrideMs = null
+        runCatching { stopService(Intent(this, SecondaryControlService::class.java)) }
     }
 
     /** Called by the TAPNEX app right after it launches the selected target app. */
     fun onTargetLaunchedByApp() {
         graceUntil = SystemClock.uptimeMillis() + 6000L
-        showControls()
-    }
-
-    private fun currentImePackage(): String? =
-        Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)?.substringBefore('/')
-
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Only the foreground package name is read. No screen text, nodes, or content are read.
-        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        val target = getSharedPreferences("tapnex_target", MODE_PRIVATE).getString("package", null) ?: return
-        val pkg = event.packageName?.toString() ?: return
-        val cls = event.className?.toString().orEmpty()
-
-        if (pkg == target) {
-            showControls()
-            return
-        }
-        // Our own floating windows and ad screens are not "another app". Only the TAPNEX home screen is.
-        if (pkg == packageName && !cls.endsWith("MainActivity")) return
-        if (pkg in ignoredPackages || pkg == currentImePackage()) return
-        if (SystemClock.uptimeMillis() < graceUntil) return
-        hideControls()
     }
 
     override fun onInterrupt() {
@@ -128,13 +134,9 @@ class TapnexAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
+    // ---------------------------------------------------------------- tap engine
+
     /** Returns null when tapping started, otherwise a message the user can read. */
-    /** When set (by the floating control's speed setting), replaces each point's interval. */
-    @Volatile
-    var intervalOverrideMs: Long? = null
-
-    private fun intervalFor(point: ClickPoint): Long = intervalOverrideMs ?: point.intervalMs
-
     fun startEngine(owner: String = OWNER_MAIN): String? {
         if (engineState == EngineState.RUNNING) return null
         if (PointStore.load().none { it.enabled }) {
@@ -168,6 +170,8 @@ class TapnexAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(tick)
     }
 
+    private fun intervalFor(point: ClickPoint): Long = intervalOverrideMs ?: point.intervalMs
+
     private fun dispatchNext(gen: Long) {
         if (gen != generation || engineState != EngineState.RUNNING) return
         val active = PointStore.load().filter { it.enabled }
@@ -178,15 +182,15 @@ class TapnexAccessibilityService : AccessibilityService() {
         val point = active[cursor % active.size]
         cursor++
 
-        val (screenW, screenH) = ScreenUtil.realSize(this)
-        val x = (point.nx.coerceIn(0f, 1f) * screenW).coerceIn(0f, (screenW - 1).toFloat())
-        val y = (point.ny.coerceIn(0f, 1f) * screenH).coerceIn(0f, (screenH - 1).toFloat())
+        val (sw, sh) = ScreenUtil.realSize(this)
+        val x = (point.nx.coerceIn(0f, 1f) * sw).coerceIn(0f, (sw - 1).toFloat())
+        val y = (point.ny.coerceIn(0f, 1f) * sh).coerceIn(0f, (sh - 1).toFloat())
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 20))
             .build()
 
-        val accepted = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 scheduleNext(gen, intervalFor(point))
             }
@@ -201,6 +205,6 @@ class TapnexAccessibilityService : AccessibilityService() {
 
     private fun scheduleNext(gen: Long, delayMs: Long) {
         if (gen != generation || engineState != EngineState.RUNNING) return
-        handler.postDelayed(tick, delayMs.coerceAtLeast(100L))
+        handler.postDelayed(tick, delayMs.coerceAtLeast(0L))
     }
 }
